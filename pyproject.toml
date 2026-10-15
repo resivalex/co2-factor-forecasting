@@ -1,0 +1,20 @@
+[project]
+name = "co2-factor-forecasting"
+version = "0.1.0"
+description = "7-day hourly CO2 factor forecast for the Netherlands from NED renewable production data"
+requires-python = ">=3.12"
+dependencies = [
+    "pandas>=3.0.6",
+    "requests>=2.34.2",
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.1",
+]

@@ -1,0 +1,9 @@
+services:
+  pipeline:
+    build: .
+    env_file: .env
+    # Files written to data/ belong to this user instead of root
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ./data:/app/data
+    command: python -m co2_forecast

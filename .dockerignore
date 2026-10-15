@@ -1,0 +1,10 @@
+# Same entries as .gitignore, plus git metadata
+.git
+**/__pycache__
+.venv
+.env
+.ruff_cache
+**/.DS_Store
+
+# Mounted at runtime, not baked into the image
+data
