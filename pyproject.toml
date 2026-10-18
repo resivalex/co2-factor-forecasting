@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "7-day hourly CO2 factor forecast for the Netherlands from NED renewable production data"
 requires-python = ">=3.12"
 dependencies = [
+    "holidays>=0.106",
+    "lightgbm>=4.7.0",
+    "matplotlib>=3.11.2",
     "pandas>=3.0.6",
     "requests>=2.34.2",
 ]
