@@ -1,6 +1,5 @@
-"""Download, store and load hourly NED Current history of the 12 energy series and the CO2 factor."""
+"""Download, store and load hourly NED data: Current history of the model series and the CO2 factor, and Forecast."""
 
-import json
 import math
 import os
 import time
@@ -14,65 +13,90 @@ HISTORY_DIR = Path("data/ned-history")
 HOUR = pd.Timedelta(hours=1)
 WEEK = pd.Timedelta(hours=168)
 PAGE_SIZE = 200
-# NED allows 200 requests per 5 minutes, one per 1.5 s on average; the margin absorbs timing jitter.
+# NED allows 200 requests per 5 minutes, one per 1.5 s on average. The margin absorbs timing jitter.
 REQUEST_INTERVAL_SECONDS = 1.5 + 0.05
 RETRY_PAUSES_SECONDS = (5, 15, 45)
 TEMPORARY_HTTP_ERRORS = {429, 500, 502, 503, 504}
+
+CURRENT = 2
+FORECAST = 1
 
 # Series name -> (NED type, activity). Activity 1 is Providing, 2 is Consuming.
 SERIES = {
     "solar": (2, 1),
     "wind_onshore": (1, 1),
     "wind_offshore": (51, 1),
-    "gas": (18, 1),
-    "coal": (19, 1),
     "nuclear": (20, 1),
-    "waste": (21, 1),
     "biomass": (25, 1),
-    "other": (26, 1),
-    "chp": (35, 1),
-    "total_generation": (27, 1),
     "load": (59, 2),
+    "total_generation": (27, 1),
 }
-# The CO2 target is the emission factor of ElectricityMix, stored with its volume.
-CO2_SERIES = "total_generation"
+# Model inputs. total_generation is stored only for its emissionfactor, the CO2 factor being forecast.
+INPUTS = [name for name in SERIES if name != "total_generation"]
+# Fields kept from each hourly NED record. The others are fixed by the request or unused.
+STORED_FIELDS = ["validfrom", "volume", "emissionfactor", "lastupdate"]
 
 
 def update_history(start: pd.Timestamp) -> None:
     """Bring every stored series up to the download cutoff, starting no later than `start`."""
     if not os.environ.get("NED_API_KEY"):
-        raise RuntimeError("NED_API_KEY is not set; add your NED API key to .env")
+        raise RuntimeError("NED_API_KEY is not set. Add your NED API key to .env")
     cutoff = pd.Timestamp.now(tz="UTC").floor("h") - HOUR
     for name in SERIES:
         stored = _read(name)
+        stored_hours = pd.DatetimeIndex(pd.to_datetime(stored["validfrom"], utc=True))
         downloaded = []
-        for range_start, range_end in _request_ranges(stored, start, cutoff):
+        for range_start, range_end in _request_ranges(stored_hours, start, cutoff):
             print(f"Downloading {name} for [{range_start:%Y-%m-%d %H:%M}, {range_end:%Y-%m-%d %H:%M})Z")
             downloaded += _download(name, range_start, range_end)
         _validate(name, downloaded)
-        merged = {record["validfrom"]: record for record in stored + downloaded}
-        _write(name, [merged[key] for key in sorted(merged)])
+        merged = pd.concat([stored, pd.DataFrame(downloaded, columns=STORED_FIELDS)])
+        _write(name, merged.drop_duplicates("validfrom", keep="last").sort_values("validfrom"))
 
 
 def load_table(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    """Hourly volumes (kWh) of all series and the CO2 factor (gCO2/kWh) for interval starts in [start, end).
+    """Hourly input volumes (kWh) and the CO2 factor (gCO2/kWh) for interval starts in [start, end).
 
     Hours missing from the NED history are left empty.
     """
     hours = pd.date_range(start, end, freq="h", inclusive="left")
+    table = hourly(dict(zip(INPUTS, map(_read, INPUTS))), hours)
+    total = _read("total_generation").set_index("validfrom")
+    total.index = pd.to_datetime(total.index, utc=True)
+    return table.assign(co2_factor=1000 * total["emissionfactor"].reindex(hours))
+
+
+def download_forecast(start: pd.Timestamp, end: pd.Timestamp) -> dict[str, pd.DataFrame]:
+    """The latest records of NED's Forecast for every input series with interval starts in [start, end)."""
+    if not os.environ.get("NED_API_KEY"):
+        raise RuntimeError("NED_API_KEY is not set. Add your NED API key to .env")
+    forecast = {}
+    for name in INPUTS:
+        print(f"Downloading the {name} forecast")
+        downloaded = _download(name, start, end, FORECAST)
+        _validate(name, downloaded)
+        forecast[name] = pd.DataFrame(downloaded, columns=STORED_FIELDS)
+    return forecast
+
+
+def hourly(records: dict[str, pd.DataFrame], hours: pd.DatetimeIndex) -> pd.DataFrame:
+    """Volumes of the given records on the given hours, empty where a record is missing."""
     columns = {}
-    for name in SERIES:
-        series = pd.DataFrame(_read(name), columns=["validfrom", "volume", "emissionfactor"])
-        series.index = pd.to_datetime(series["validfrom"], utc=True)
+    for name, series in records.items():
+        series = series.set_index("validfrom")
+        series.index = pd.to_datetime(series.index, utc=True)
         columns[name] = series["volume"].reindex(hours)
-        if name == CO2_SERIES:
-            columns["co2"] = series["emissionfactor"].reindex(hours) * 1000
-    return pd.DataFrame(columns)
+    return pd.DataFrame(columns, index=hours)
 
 
-def records(start: pd.Timestamp, end: pd.Timestamp) -> dict[str, list[dict]]:
-    """Original NED records of every series with interval starts in [start, end)."""
-    return {name: [r for r in _read(name) if start <= pd.Timestamp(r["validfrom"]) < end] for name in SERIES}
+def records(start: pd.Timestamp, end: pd.Timestamp) -> dict[str, pd.DataFrame]:
+    """Stored NED records of every series with interval starts in [start, end)."""
+    selected = {}
+    for name in SERIES:
+        history = _read(name)
+        starts = pd.to_datetime(history["validfrom"], utc=True)
+        selected[name] = history[(starts >= start) & (starts < end)]
+    return selected
 
 
 def describe_gaps(table: pd.DataFrame) -> list[str]:
@@ -88,29 +112,28 @@ def describe_gaps(table: pd.DataFrame) -> list[str]:
 
 
 def _request_ranges(
-    stored: list[dict], start: pd.Timestamp, cutoff: pd.Timestamp
+    stored_hours: pd.DatetimeIndex, start: pd.Timestamp, cutoff: pd.Timestamp
 ) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
     """Each stretch of hours missing before the stored end, then the week before that end and everything newer."""
-    if not stored:
+    if stored_hours.empty:
         return [(start, cutoff)]
-    overlap_start = max(start, pd.Timestamp(stored[-1]["validto"]) - WEEK)
-    stored_hours = pd.DatetimeIndex(pd.to_datetime([r["validfrom"] for r in stored], utc=True))
+    overlap_start = max(start, stored_hours.max() + HOUR - WEEK)
     missing = pd.date_range(start, overlap_start, freq="h", inclusive="left").difference(stored_hours)
     return [*_hour_ranges(missing), (overlap_start, cutoff)]
 
 
-def _download(name: str, start: pd.Timestamp, end: pd.Timestamp) -> list[dict]:
-    """All Current hourly national records with interval starts in [start, end), oldest first."""
+def _download(name: str, start: pd.Timestamp, end: pd.Timestamp, classification: int = CURRENT) -> list[dict]:
+    """All hourly national records with interval starts in [start, end), oldest first."""
     type_id, activity = SERIES[name]
     url = f"{API}/v1/utilizations"
     params = {
         "point": 0,
         "type": type_id,
         "activity": activity,
-        "classification": 2,
+        "classification": classification,
         "granularity": 5,
         "granularitytimezone": 0,
-        # Date filters accept whole UTC dates only; the hours outside [start, end) are dropped below.
+        # Date filters accept whole UTC dates only, so the hours outside [start, end) are dropped below.
         "validfrom[after]": f"{start:%Y-%m-%d}",
         "validfrom[strictly_before]": f"{end.ceil('D'):%Y-%m-%d}",
         "order[validfrom]": "asc",
@@ -145,7 +168,6 @@ def _get(url: str, params: dict | None) -> dict:
 
 
 def _validate(name: str, downloaded: list[dict]) -> None:
-    fields = ["volume", "emissionfactor"] if name == CO2_SERIES else ["volume"]
     starts = pd.to_datetime([r["validfrom"] for r in downloaded], utc=True)
     ends = pd.to_datetime([r["validto"] for r in downloaded], utc=True)
     problems = {
@@ -153,7 +175,9 @@ def _validate(name: str, downloaded: list[dict]) -> None:
         "not one hour long": (ends - starts != HOUR).any(),
         "duplicate intervals": starts.duplicated().any(),
         "non-numeric or non-finite values": not all(
-            isinstance(r[field], int | float) and math.isfinite(r[field]) for r in downloaded for field in fields
+            isinstance(r[field], int | float) and math.isfinite(r[field])
+            for r in downloaded
+            for field in ("volume", "emissionfactor")
         ),
     }
     found = [problem for problem, present in problems.items() if present]
@@ -168,14 +192,17 @@ def _hour_ranges(hours: pd.DatetimeIndex) -> list[tuple[pd.Timestamp, pd.Timesta
     return [(group.iloc[0], group.iloc[-1] + HOUR) for _, group in groups]
 
 
-def _read(name: str) -> list[dict]:
-    path = HISTORY_DIR / f"{name}.json"
-    return json.loads(path.read_text()) if path.exists() else []
+def _read(name: str) -> pd.DataFrame:
+    path = HISTORY_DIR / f"{name}.csv"
+    if not path.exists():
+        return pd.DataFrame(columns=STORED_FIELDS)
+    # The default parser may change the last bit of a float, so rewriting the history would alter NED values.
+    return pd.read_csv(path, float_precision="round_trip")
 
 
-def _write(name: str, history: list[dict]) -> None:
+def _write(name: str, history: pd.DataFrame) -> None:
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-    path = HISTORY_DIR / f"{name}.json"
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(history))
+    path = HISTORY_DIR / f"{name}.csv"
+    temporary = path.with_suffix(".csv.tmp")
+    history.to_csv(temporary, index=False)
     temporary.replace(path)
