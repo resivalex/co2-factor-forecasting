@@ -2,7 +2,9 @@ __pycache__/
 .venv/
 .env
 .ruff_cache/
+.mypy_cache/
 .DS_Store
 
-# Reproduced by the pipeline
-/data/
+# Reproduced by the pipeline, except the seed history shipped with the repository
+/data/*
+!/data/seed/

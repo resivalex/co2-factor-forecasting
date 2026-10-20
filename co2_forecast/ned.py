@@ -1,4 +1,4 @@
-"""Download, store and load hourly NED data: Current history of the model series and the CO2 factor, and Forecast."""
+"""Download, store and load hourly NED data: Current inputs and CO2 factor, and Forecast inputs."""
 
 import math
 import os
@@ -10,6 +10,8 @@ import requests
 
 API = "https://api.ned.nl"
 HISTORY_DIR = Path("data/ned-history")
+# History shipped with the repository. A series missing from HISTORY_DIR starts from it instead of a full download.
+SEED_DIR = Path("data/seed/ned-history")
 HOUR = pd.Timedelta(hours=1)
 WEEK = pd.Timedelta(hours=168)
 PAGE_SIZE = 200
@@ -35,22 +37,21 @@ SERIES = {
 INPUTS = [name for name in SERIES if name != "total_generation"]
 # Fields kept from each hourly NED record. The others are fixed by the request or unused.
 STORED_FIELDS = ["validfrom", "volume", "emissionfactor", "lastupdate"]
+# Width of the series name column in printed reports, so their dates line up.
+NAME_WIDTH = max(map(len, SERIES))
 
 
 def update_history(start: pd.Timestamp) -> None:
     """Bring every stored series up to the download cutoff, starting no later than `start`."""
-    if not os.environ.get("NED_API_KEY"):
-        raise RuntimeError("NED_API_KEY is not set. Add your NED API key to .env")
     cutoff = pd.Timestamp.now(tz="UTC").floor("h") - HOUR
+    print(f"Downloading NED history up to {cutoff:%Y-%m-%d %H:%M} UTC")
     for name in SERIES:
-        stored = _read(name)
-        stored_hours = pd.DatetimeIndex(pd.to_datetime(stored["validfrom"], utc=True))
-        downloaded = []
-        for range_start, range_end in _request_ranges(stored_hours, start, cutoff):
-            print(f"Downloading {name} for [{range_start:%Y-%m-%d %H:%M}, {range_end:%Y-%m-%d %H:%M})Z")
-            downloaded += _download(name, range_start, range_end)
+        history = _read(name)
+        download_start = _download_start(pd.to_datetime(history["validfrom"], utc=True), start)
+        print(f"  {name:<{NAME_WIDTH}}  from {download_start:%Y-%m-%d %H:%M} UTC")
+        downloaded = _download(name, download_start, cutoff)
         _validate(name, downloaded)
-        merged = pd.concat([stored, pd.DataFrame(downloaded, columns=STORED_FIELDS)])
+        merged = pd.concat([history, pd.DataFrame(downloaded, columns=STORED_FIELDS)])
         _write(name, merged.drop_duplicates("validfrom", keep="last").sort_values("validfrom"))
 
 
@@ -68,11 +69,10 @@ def load_table(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
 
 def download_forecast(start: pd.Timestamp, end: pd.Timestamp) -> dict[str, pd.DataFrame]:
     """The latest records of NED's Forecast for every input series with interval starts in [start, end)."""
-    if not os.environ.get("NED_API_KEY"):
-        raise RuntimeError("NED_API_KEY is not set. Add your NED API key to .env")
+    print("Downloading NED forecast")
     forecast = {}
     for name in INPUTS:
-        print(f"Downloading the {name} forecast")
+        print(f"  {name}")
         downloaded = _download(name, start, end, FORECAST)
         _validate(name, downloaded)
         forecast[name] = pd.DataFrame(downloaded, columns=STORED_FIELDS)
@@ -89,37 +89,26 @@ def hourly(records: dict[str, pd.DataFrame], hours: pd.DatetimeIndex) -> pd.Data
     return pd.DataFrame(columns, index=hours)
 
 
-def records(start: pd.Timestamp, end: pd.Timestamp) -> dict[str, pd.DataFrame]:
-    """Stored NED records of every series with interval starts in [start, end)."""
-    selected = {}
-    for name in SERIES:
-        history = _read(name)
-        starts = pd.to_datetime(history["validfrom"], utc=True)
-        selected[name] = history[(starts >= start) & (starts < end)]
-    return selected
-
-
 def describe_gaps(table: pd.DataFrame) -> list[str]:
     """One line per column with missing hours, naming their count and intervals."""
     report = []
     for name, column in table.items():
         missing = column.index[column.isna()]
         if len(missing):
-            ranges = [f"[{a:%Y-%m-%d %H:%M}, {b:%Y-%m-%d %H:%M})Z" for a, b in _hour_ranges(missing)]
+            ranges = [f"{a:%Y-%m-%d %H:%M} to {b:%Y-%m-%d %H:%M}" for a, b in _hour_ranges(missing)]
             shown = ", ".join(ranges[:5]) + (" ..." if len(ranges) > 5 else "")
-            report.append(f"{name}: {len(missing)} hours missing in {shown}")
+            report.append(f"  {name:<{NAME_WIDTH}}  {shown} UTC, {len(missing)} hours")
     return report
 
 
-def _request_ranges(
-    stored_hours: pd.DatetimeIndex, start: pd.Timestamp, cutoff: pd.Timestamp
-) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
-    """Each stretch of hours missing before the stored end, then the week before that end and everything newer."""
-    if stored_hours.empty:
-        return [(start, cutoff)]
-    overlap_start = max(start, stored_hours.max() + HOUR - WEEK)
-    missing = pd.date_range(start, overlap_start, freq="h", inclusive="left").difference(stored_hours)
-    return [*_hour_ranges(missing), (overlap_start, cutoff)]
+def _download_start(stored_hours: pd.Series, start: pd.Timestamp) -> pd.Timestamp:
+    """Where to start downloading: the last stored week, which NED revises, or `start` if the history begins later.
+
+    Gaps inside the stored history are NED's own and are not requested again.
+    """
+    if stored_hours.empty or start < stored_hours.min():
+        return start
+    return max(start, stored_hours.max() + HOUR - WEEK)
 
 
 def _download(name: str, start: pd.Timestamp, end: pd.Timestamp, classification: int = CURRENT) -> list[dict]:
@@ -194,6 +183,8 @@ def _hour_ranges(hours: pd.DatetimeIndex) -> list[tuple[pd.Timestamp, pd.Timesta
 
 def _read(name: str) -> pd.DataFrame:
     path = HISTORY_DIR / f"{name}.csv"
+    if not path.exists():
+        path = SEED_DIR / f"{name}.csv.gz"
     if not path.exists():
         return pd.DataFrame(columns=STORED_FIELDS)
     # The default parser may change the last bit of a float, so rewriting the history would alter NED values.

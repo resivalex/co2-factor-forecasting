@@ -48,10 +48,9 @@ For each target hour, the model sees only that hour's values:
 
 The CO₂ factor's own history is not an input, because the model should learn how renewable generation and demand drive the CO₂ factor, not repeat its past values.
 
-![NED's Current inputs and CO₂ factor for one week](images/inputs-week.png)
+![NED's Current generation inputs stacked against demand, with the CO₂ factor below, 5–11 October 2026](images/inputs-week.png)
 
-- The chart shows the five generation inputs stacked against demand, with the CO₂ factor below, as hourly Current values for 5–11 October 2026.
-- The CO₂ factor is low when the stack reaches demand and high when a gap remains for fossil plants.
+The CO₂ factor is low when the stack reaches demand and high when a gap remains for fossil plants.
 
 ### Model
 
@@ -95,7 +94,6 @@ Metrics in gCO₂/kWh:
 
 ![Actual, model and baseline CO₂ factor for the test week from Monday 21 September 2026](images/test-week.png)
 
-- The chart shows one test week with actual inputs.
 - The model follows the daily solar dips and the multi-day wind periods that the baseline misses.
 - Most of the remaining error is a level shift, as the mean error shows. The model under-forecasts on the autumn test and over-forecasts on the summer validation. The linear regression shifts the same way, so the shift does not come from boosting.
 - The model does not see fuel and CO₂ prices or temperature. Prices decide whether gas or coal covers the residual load, and cold weather keeps CHP plants running for heat, so either may cause the shift.
@@ -108,12 +106,12 @@ Metrics in gCO₂/kWh:
 
 ![SHAP value of each input on every test hour, coloured by the input's level](images/shap-hours.png)
 
-- Each point is one test hour, and its colour is the input's level. High wind and solar lower the CO₂ factor, and high residual load and biomass raise it.
+- High wind and solar lower the CO₂ factor, and high residual load and biomass raise it.
 - Wind, solar and demand also enter residual load, so SHAP splits one effect between them. This is why high demand shows a small negative value.
 
 ## Live forecast
 
-- The run from 19 October 2026, 20:00 UTC, shows the whole pipeline on NED's live Forecast. Its shape follows NED's own CO₂ factor forecast, with correlation 0.95.
+The run from 19 October 2026, 20:00 UTC, shows the whole pipeline on NED's live Forecast. Its shape follows NED's own CO₂ factor forecast, with correlation 0.95.
 
 ![CO₂ factor forecast from 19 October 2026, 20:00 UTC, with NED's own CO₂ factor forecast](images/live-forecast.png)
 
@@ -124,7 +122,7 @@ Metrics in gCO₂/kWh:
 - The four test weeks cover one autumn. NED also revises its history, and the evaluation uses the values as downloaded.
 - The last one to three forecast hours repeat the previous day, because NED's Forecast ends early or with a partial hour.
 - NED revises its Forecast within hours. In two snapshots taken about a day apart, on 18–19 October 2026, the same target hours changed on average by 7–25% for wind and solar, 1% for demand and 19% for NED's own CO₂ factor forecast.
-- The chart shows three onshore wind snapshots with Current for the hours already passed. They agree for the first day and diverge later.
+- The three onshore wind snapshots in the chart agree for the first day and diverge later.
 
 ![Three snapshots of NED's onshore wind Forecast for the same target hours, with NED's Current](images/wind-revisions.png)
 

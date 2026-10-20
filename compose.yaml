@@ -1,8 +1,8 @@
 services:
   pipeline:
     build: .
-    env_file: .env
-    # Files written to data/ belong to this user instead of root
+    # Files written to the project belong to this user instead of root
     user: "${UID:-1000}:${GID:-1000}"
+    # The run reads data/seed/ and .env.example and writes data/ and .env in the project
     volumes:
-      - ./data:/app/data
+      - .:/app
